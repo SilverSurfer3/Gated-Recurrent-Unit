@@ -1,0 +1,160 @@
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import GRU, Dense, Dropout
+from tensorflow.keras.optimizers import RMSprop
+from tensorflow.keras.callbacks import EarlyStopping
+from kerastuner.tuners import RandomSearch
+from kerastuner.engine.hyperparameters import HyperParameters
+import matplotlib.pyplot as plt
+from sklearn.cluster import KMeans
+from sklearn.ensemble import IsolationForest
+from prefixspan import PrefixSpan
+
+# Function to create GRU model
+def build_gru_model(hp):
+    model = Sequential()
+    model.add(GRU(units=hp.Int('units_1', min_value=32, max_value=256, step=32),
+                  input_shape=(window_size, 1),
+                  activation='relu',
+                  return_sequences=True))
+    model.add(Dropout(rate=hp.Float('dropout_1', min_value=0.0, max_value=0.5, step=0.1)))
+    
+    for i in range(hp.Int('num_layers', min_value=1, max_value=3)):
+        model.add(GRU(units=hp.Int(f'units_{i+2}', min_value=32, max_value=256, step=32),
+                      activation='relu',
+                      return_sequences=True if i < hp.Int('num_layers', min_value=1, max_value=3)-1 else False))
+        model.add(Dropout(rate=hp.Float(f'dropout_{i+2}', min_value=0.0, max_value=0.5, step=0.1)))
+
+    model.add(Dense(units=1, kernel_regularizer=tf.keras.regularizers.l2(hp.Float('l2_regularization', min_value=1e-6, max_value=1e-3, sampling='log'))))
+    
+    optimizer = RMSprop(learning_rate=hp.Float('learning_rate', min_value=1e-5, max_value=1e-2, sampling='log'))
+    model.compile(optimizer=optimizer, loss='mean_squared_error')
+    return model
+
+# Function to perform anomaly detection
+def detect_anomalies(data):
+    # Apply anomaly detection algorithm (Isolation Forest)
+    clf = IsolationForest(contamination=0.05)
+    anomalies = clf.fit_predict(data.reshape(-1, 1))
+    return anomalies
+
+# Function to perform cluster analysis
+def perform_cluster_analysis(data):
+    # Apply clustering algorithm (KMeans)
+    kmeans = KMeans(n_clusters=3)
+    clusters = kmeans.fit_predict(data.reshape(-1, 1))
+    return clusters
+
+# Function to perform sequence mining
+def perform_sequence_mining(data):
+    # Convert data to a list of sequences
+    sequences = [[str(item)] for item in data.tolist()]
+
+    # Apply sequence mining algorithm (PrefixSpan)
+    ps = PrefixSpan(sequences)
+    frequent_patterns = ps.frequent(2)
+    return frequent_patterns
+
+# Function to create sequences from data
+def create_sequences(data, window_size):
+    X, y = [], []
+    for i in range(len(data) - window_size):
+        X.append(data[i:i+window_size])
+        y.append(data[i+window_size])
+    return np.array(X), np.array(y)
+
+# Function to generate forecasts
+def generate_forecast(model, data, window_size, forecast_length):
+    forecast = []
+    for _ in range(forecast_length):
+        input_data = data[-window_size:]
+        input_data = np.reshape(input_data, (1, window_size, 1))
+        prediction = model.predict(input_data)[0][0]
+        forecast.append(prediction)
+        data = np.append(data, prediction)
+    return forecast
+
+# New data
+new_data = np.array([
+    1,1,1,1,1,0,1,0,0,1,0,1,1,0,1,0,0,1,0,0,0,1,1,0,1,0,0,0,1,0,0,1,0,1,1,1,0,1,0,1,1,1,0,1,1,1,0,1,1,1,0,0,0,1,1,0,0,1,0,0,1,0,0,1,0,0,1,1,0,0,0,0,0,0,0,0,1,0,1,1,0,1,1,1,1,1,0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,1,1,0,1,1,0,0,0,1
+])
+
+# Historical data (assuming this is available)
+historical_data = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+
+# Combine historical data with new data
+data = np.concatenate((historical_data, new_data))
+
+# Data preparation
+window_size = 5  # Length of input sequences
+X, y = create_sequences(data, window_size)
+
+# Extract features
+anomalies = detect_anomalies(data[:-len(new_data)])  # Apply on historical data only
+clusters = perform_cluster_analysis(data[:-len(new_data)])  # Apply on historical data only
+frequent_patterns = perform_sequence_mining(data[:-len(new_data)])  # Apply on historical data only
+
+# Print the results of cluster analysis
+print("Clusters:")
+print(clusters)
+
+# Print the results of sequence mining
+print("Frequent Patterns:")
+print(frequent_patterns)
+
+# Split data into training and testing sets
+split = int(0.8 * len(X))
+X_train, X_test = X[:split], X[split:]
+y_train, y_test = y[:split], y[split:]
+
+# Define early stopping callback
+early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+
+# Instantiate the RandomSearch tuner to search for optimal hyperparameters
+tuner = RandomSearch(
+    build_gru_model,
+    objective='val_loss',
+    max_trials=5,
+    executions_per_trial=3,
+    directory='gru_hyperparameters',
+    project_name='forecasting'
+)
+
+# Search for the best hyperparameter configuration
+tuner.search(X_train, y_train, epochs=3000, batch_size=32, validation_split=0.1, callbacks=[early_stopping])
+
+# Get the best model architecture
+best_model = tuner.get_best_models(num_models=1)[0]
+
+# Train the best model
+history = best_model.fit(X_train, y_train, epochs=3000, batch_size=32, validation_split=0.1, callbacks=[early_stopping])
+
+# Evaluate the best model
+loss = best_model.evaluate(X_test, y_test)
+print("Test Loss:", loss)
+
+# Make predictions
+predictions = best_model.predict(X_test)
+
+# Forecast the next value
+forecast_length = 1  # Number of future values to forecast
+forecast = generate_forecast(best_model, data, window_size, forecast_length)
+print("Forecast:", forecast)
+
+# Visualize training history
+plt.plot(history.history['loss'], label='Training Loss')
+plt.plot(history.history['val_loss'], label='Validation Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+plt.show()
+
+# Visualize predictions and actual values
+plt.plot(y_test, label='Actual')
+plt.plot(predictions, label='Predicted')
+plt.scatter(len(y_test), forecast, color='red', label='Forecast')  # Add a red dot for the forecast
+plt.xlabel('Day')
+plt.ylabel('Value')
+plt.legend()
+plt.show()
